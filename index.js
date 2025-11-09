@@ -14,7 +14,7 @@ app.use(express.json()); // for JSON POST bodies
 // --- Config ---
 const PLACE_TTL_MS   = 30_000; // remove if no heartbeat within 30s
 const CLEAN_MS       = 5_000;  // how often to sweep stale places
-const SCRIPT_TTL_MS  = 30_000; // pending script auto-delete after 30s
+const SCRIPT_TTL_MS  = 10_000; // pending script auto-delete after 30s
 
 // --- In-memory stores ---
 /** placeId -> { displayName: string, lastSeen: number } */
